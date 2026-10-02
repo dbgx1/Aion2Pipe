@@ -1,0 +1,8 @@
+{
+  "host": "your-mqtt-host",
+  "port": 8883,
+  "username": "your-device-username",
+  "password": "your-device-password",
+  "room": "aion2-local",
+  "prefix": "aion2-chat-bridge"
+}
