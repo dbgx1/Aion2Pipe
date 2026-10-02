@@ -1,0 +1,9 @@
+private/character-report-defaults.hpp
+private/chat_bridge/mqtt.private.local.json
+private/emqx-api.json
+private/emqx-connection.json
+private/emqx-global-acl-20260930192643.json
+private/emqx-global-acl-20260930192709.json
+private/query_credential.hpp
+private/query-devices/aion2pipe-local-20260930.json
+private/query-dispatch-secrets.json

@@ -1,0 +1,8 @@
+{
+  "host": "od43e177.ala.cn-shenzhen.emqxsl.cn",
+  "username": "query-aion2pipe-local-20260930",
+  "websocketPort": 8084,
+  "passwordDpapi": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAvD++iSCsg0ePsm310PNj1gAAAAACAAAAAAAQZgAAAAEAACAAAABhvD1/yVDJOlwSVLRoG3d9hs/+59AAMEL/i6DlQd0k2gAAAAAOgAAAAAIAACAAAACdqXM1H7x8i3odHi1MGYhVuKlC2S2vlBJU0FnRp7rJuzAAAABtLEP4zHkeh9JfzMmZiFxtxyBbzjWFvMXKJqN+zFmKJsp0W7sPASX6R0Rhye8kfbJAAAAAh2908EvkbQKsvOoIHzYWh58ik2rJz+fBmgQqacj8fgPHcmc/9tEQeT+GOmap5wCtZKdWqSjr4/8b5he0UmZb6Q==",
+  "clientId": "aion2pipe-local-20260930",
+  "boot": 0
+}

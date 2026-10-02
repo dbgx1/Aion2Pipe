@@ -1,5 +1,7 @@
 # Git 源码目录说明
 
+2026-10-03 更新：用户明确要求将现有 `private/` 文件公开上传，已授权的路径列于 `.codex/published-private-files.txt`，作为下方排除规则的例外。这些文件包含真实配置；新的私有文件仍默认忽略。设备凭据中的 DPAPI 密文仍绑定原 Windows 用户，复制到其他机器并不等于可直接使用。
+
 提交内容包括 `src/`、`tests/`、`scripts/`、`docs/`、`data/skin_catalog.json`、`chat_bridge/source/`、聊天组件构建配置，以及根目录的 CMake 和说明文件。`.codex/skills/` 是项目打包技能，也可随源码提交。
 
 ## 本机保留、Git 排除

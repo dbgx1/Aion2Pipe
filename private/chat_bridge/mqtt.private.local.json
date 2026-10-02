@@ -1,0 +1,8 @@
+{
+  "host": "od43e177.ala.cn-shenzhen.emqxsl.cn",
+  "port": 8883,
+  "username": "aion2-private",
+  "password": "wz8520qq",
+  "room": "aion2-local",
+  "prefix": "aion2-chat-bridge"
+}

@@ -22,13 +22,21 @@ function Get-PackageGitSnapshot {
     $paths = @(& git -C $resolvedRoot -c core.quotepath=false ls-files --cached --others --exclude-standard)
     if ($LASTEXITCODE -ne 0) { throw 'Unable to list Git-visible files.' }
     $snapshot = @{}
+    # Explicit publication exception authorized by the owner on 2026-10-03.
+    $publishedFile = Join-Path $resolvedRoot '.codex/published-private-files.txt'
+    $published = @()
+    if (Test-Path -LiteralPath $publishedFile) {
+        $published = @(Get-Content -LiteralPath $publishedFile | Where-Object {
+            $_ -match '^private/' -and $_ -notmatch '(^|/)\.\.(/|$)'
+        })
+    }
     foreach ($path in $paths | Sort-Object -Unique) {
         if ($path -match '^(build(?:-[^/]+)?|dist(?:-[^/]+)?|release|artifacts|third_party|private|Aion2Pipe-[^/]+-win64)/' -or
             $path -match '^chat_bridge/(\.python|\.venv(?:-local)?|build|dist)/' -or
             $path -match '(?i)(\.(exe|dll|sys|zip|7z|pdb|obj|ilk|pyc|pyo|bin|dmp|log|pcap|pcapng|a2session|a2cs|sqlite3?|db)|\.private\.local\.json|\.log\..+|\.db-(wal|shm))$' -or
             $path -match '(?i)(^|/)(__pycache__|\.pytest_cache|\.vs)/' -or
             ($path -match '(?i)(^|/)\.env(?:\.[^/]+)?$' -and $path -notmatch '(?i)(^|/)\.env\.example$')) {
-            throw "Generated or private file is visible to Git: $path"
+            if ($path -notin $published) { throw "Generated or private file is visible to Git: $path" }
         }
         $fullPath = Join-Path $resolvedRoot $path
         $snapshot[$path] = if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
