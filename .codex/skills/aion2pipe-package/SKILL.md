@@ -39,6 +39,7 @@ Preserve these product invariants:
 - Keep real MQTT configuration only in ignored `private/chat_bridge/mqtt.private.local.json`. The tracked source contains an example with placeholders.
 - Runtime paths must be relative to the executable directory. Reject development paths found in release configuration or launcher files.
 - Run the full CTest suite before packaging. A failed build or test means no ZIP is published.
+- Standard packaging must not require local capture samples such as `response-3650.bin`. `skin_tests` uses synthetic data and the tracked catalog. Enable extra capture validation only when explicitly supplying an existing file through CMake's `AION2PIPE_SKIN_RESPONSE_FIXTURE` cache option. Do not fabricate a capture or skip the standard tests to make packaging pass.
 - Include the bundled chat bridge, WinDivert files, licenses, docs, a Chinese quick-start, a manifest, and SHA-256 checksums.
 - Do not overwrite an existing release directory or ZIP; choose a new version instead.
 

@@ -20,7 +20,7 @@
 1. 安装 Windows x64 的 Visual Studio C++ 桌面开发工具和 CMake。
 2. 执行 `scripts/bootstrap.ps1` 获取第三方依赖。
 3. 按 [查询服务说明](QUERY_SERVICE.md) 准备自己的查询服务配置，再执行 `scripts/embed-query-credential.ps1`。`private/query_credential.hpp` 是必需的本机构建输入，不在仓库中。
-4. 执行 `scripts/build.ps1` 编译和测试。部分真实抓包验证需要本机 `artifacts/` 下的样本；仓库不分发这些采集数据。
+4. 执行 `scripts/build.ps1` 编译和测试。标准时装测试不依赖 `response-3650.bin`。需要额外验证真实响应时，在 CMake 配置中设置 `-DAION2PIPE_SKIN_RESPONSE_FIXTURE=<样本绝对路径>`；指定的样本缺失会报错。设为空字符串可关闭这项额外验证。仓库不分发这些采集数据。
 5. 构建聊天组件时，准备 Python 并执行 `scripts/build-chat-bridge.ps1`。MQTT 配置可参考 `chat_bridge/source/mqtt.private.example.json`。
 
 角色上传令牌的可选构建默认值位于 `private/character-report-defaults.hpp`；未提供时源码默认值为空，可在客户端填写。

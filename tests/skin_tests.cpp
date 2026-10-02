@@ -24,7 +24,7 @@ static void item(Wire& w,uint32_t id,bool decorated){
     w.flag(true);w.flag(false);w.flag(true);
 }
 int main(int argc,char** argv){try{
-    check(argc==3,"usage: skin_tests response catalog");
+    check(argc==2 || argc==3,"usage: skin_tests catalog [response]");
     Wire w;w.u(0x3650,2);w.u(0,2);w.u(0,1);w.u(10,4);
     for(int i=0;i<3;++i)w.u(50,4);w.u(1001,2);w.u(1001,2);w.flag(true);w.u(0,4);
     w.u(0,8);w.var(0);w.u(0,2);w.u(0,1);w.u(0,4);w.u(0,8);w.u(0,2);w.var(0);
@@ -39,11 +39,14 @@ int main(int argc,char** argv){try{
     check(m.skins[1].display && m.skins[1].dyes.empty(),"shared bool cursor continues into second item");
     for(size_t n=2;n<w.b.size();++n){auto truncated=decodeGameFrame(frame(Bytes(w.b.begin(),w.b.begin()+n)),true);check(!truncated.skinsComplete && truncated.skins.empty(),"truncated equipment never published");}
     auto hostile=w.b;hostile[countAt]=127;auto bad=decodeGameFrame(frame(hostile),true);check(!bad.skinsComplete && bad.skins.empty(),"hostile item count bounded");
-    std::ifstream in(argv[1],std::ios::binary);check(bool(in),"real fixture exists");Bytes bytes(std::istreambuf_iterator<char>(in),{});auto real=decodeGameFrame(bytes,true);
+    if(argc==3){
+    std::ifstream in(argv[2],std::ios::binary);check(bool(in),"real fixture exists");Bytes bytes(std::istreambuf_iterator<char>(in),{});auto real=decodeGameFrame(bytes,true);
     check(real.skinsComplete && real.skins.size()==39 && real.parsedBytes==4122,"real 4674-byte response matches independent parser boundary");
     unsigned named=0;bool torso=false,mouth=false;for(const auto& e:real.skins){if(e.skinId)++named;torso|=e.visualSlot==4 && e.skinId==40089201;mouth|=e.visualSlot==13 && e.itemId==0 && e.skinId==70005102;}
     check(named==9 && torso && mouth,"real sample skin IDs and zero-item accessories match evidence");
-    SkinCatalog catalog;catalog.load(argv[2]);check(catalog.size()==1463 && catalog.locale=="en-US","exported catalog complete and language explicit");
+    std::cout<<"Real response fixture checks passed\n";
+    }
+    SkinCatalog catalog;catalog.load(argv[1]);check(catalog.size()==1463 && catalog.locale=="en-US","exported catalog complete and language explicit");
     check(catalog.name(10001101,1)=="Nameless Master (Greatsword)" && catalog.name(10001101,2)=="Nameless Master (Greatsword)","localized names agree for verified first skin");
     check(catalog.name(40089201,1)=="名称未收录","older region ID not silently mapped to current build");
     check(skinColorHex({255,128,17})=="#FF8011" && skinColorHex({0,0,0})=="#000000","RGB formatting");
@@ -57,5 +60,5 @@ int main(int argc,char** argv){try{
     check(restored.favorites==pref.favorites && !restored.prioritize,"favorites and sort setting survive restart");
     pref.favorites.insert(10001102);pref.save(preferencesPath);restored.load(preferencesPath);
     check(restored.favorites.size()==2,"atomic settings replacement preserves new favorites");std::filesystem::remove(preferencesPath);
-    std::cout<<"Skin parser, real response, truncation, shared bool and catalog checks passed\n";
+    std::cout<<"Skin parser, truncation, shared bool and catalog checks passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
