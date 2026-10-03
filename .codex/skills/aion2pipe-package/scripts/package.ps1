@@ -16,7 +16,9 @@ if ($CheckOnly) {
     return
 }
 $releaseRoot = Join-Path $root 'release'
-$name = "Aion2Pipe-$Version-win64-portable"
+$packageStartedAt = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8))
+$packageTimestamp = $packageStartedAt.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+$name = "Aion2Pipe-$Version-$packageTimestamp-UTC8-win64-portable"
 $stage = Join-Path $releaseRoot $name
 $zip = Join-Path $releaseRoot "$name.zip"
 
@@ -67,6 +69,12 @@ $privateArtifacts = Get-ChildItem -LiteralPath $stage -Recurse -File |
     Where-Object { $_.Extension -in '.log','.pcap','.cap','.a2session','.jsonl' }
 if ($privateArtifacts) { throw 'Runtime logs or capture artifacts were found in the staged release.' }
 
+[pscustomobject]@{
+    version = $Version
+    packageName = $name
+    packagingStartedAt = $packageStartedAt.ToString('o')
+} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'build-info.json') -Encoding UTF8
+
 $files = Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName
 $manifest = foreach ($file in $files) {
     $relative = $file.FullName.Substring($stage.Length + 1).Replace('\','/')
@@ -91,6 +99,7 @@ $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
 Assert-PackageGitSnapshot -Root $root -Before $gitBefore
 [pscustomobject]@{
     Version = $Version
+    PackagingStartedAt = $packageStartedAt.ToString('o')
     Directory = $stage
     Archive = $zip
     Aion2PipeSHA256 = $exeHash

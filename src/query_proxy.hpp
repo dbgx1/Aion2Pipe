@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "query_handshake.hpp"
 #include "query_receipt.hpp"
+#include "mail_exchange.hpp"
 #include "relay_selection.hpp"
 #include <winsock2.h>
 #include <windows.h>
@@ -28,6 +29,7 @@ struct QueryConnection {
     uint16_t guildOpcode{};
     std::string guildStatus="尚未查询军团";
     GameMessage guildResponse;
+    MailStatus mail;
     JumpState jumpState;
     bool jumpRepeat{};uint32_t jumpIntervalSeconds=5;uint64_t jumpNextInMs{};
     bool jumpPending{};uint64_t jumpsSent{};
@@ -48,6 +50,7 @@ public:
     bool request(size_t id,uint32_t server,uint64_t dbid);
     std::shared_ptr<QueryReceipt> requestTracked(size_t id,uint32_t server,uint64_t dbid);
     bool requestGuild(size_t id,bool search,uint8_t order,std::string name);
+    bool requestMail(size_t id,const MailRequest& request);
     bool requestJump(size_t id);
     bool setJumpRepeat(size_t id,bool enabled,uint32_t intervalSeconds=5);
     std::vector<Packet> takePackets();

@@ -23,6 +23,7 @@ public:
     Bytes fromServer(std::span<const uint8_t> bytes);
     Bytes query(uint32_t server,uint64_t dbid);
     Bytes guild(bool search,uint8_t order,std::string_view name);
+    Bytes mail(const MailRequest& request);
     Bytes jump(const JumpRequest& request);
     Bytes jumpMotion(std::span<const uint8_t> frame);
     // Replaced by each fromClient/fromServer/query call; no unbounded backlog.

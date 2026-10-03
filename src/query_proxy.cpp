@@ -1,4 +1,4 @@
-﻿#include "query_proxy.hpp"
+#include "query_proxy.hpp"
 #include "diagnostics.hpp"
 #include <iphlpapi.h>
 #include <ws2tcpip.h>
@@ -38,6 +38,8 @@ bool rewriteQueryRoute(Bytes& raw,bool& outbound,const QueryRoute& r,uint16_t li
     return false;
 }
 struct QueryProxy::Session {
+    HANDLE ownerProcess=nullptr;
+    ~Session(){if(ownerProcess)CloseHandle(ownerProcess);}
     QueryRoute route;QueryConnection view;
     uint32_t observedSequence[2]{};
     std::mutex mutex;std::thread worker;
@@ -47,6 +49,7 @@ struct QueryProxy::Session {
     std::optional<GuildCommand> guildCommand;
     uint64_t guildQueuedAt{},guildSentAt{};uint16_t guildExpected{};
     bool guildConflict{};
+    MailExchange mail;
     bool repeatArm{};uint64_t repeatRevision{},nextJumpAt{};
     bool jumpCommand{};uint64_t jumpQueuedAt{},lastJumpSent{};
     uint64_t queuedAt{},lastSent{},createdAt{};
@@ -74,8 +77,9 @@ std::string QueryProxy::routingMode()const{std::lock_guard lock(mutex_);return r
 std::vector<QueryConnection> QueryProxy::connections()const{
     std::vector<QueryConnection> v;std::lock_guard lock(mutex_);
     for(const auto& s:sessions_){std::lock_guard sl(s->mutex);auto view=s->view;
+        view.mail=s->mail.view;
         view.queryCooldownMs=0; // No fixed delay; waiting/command gates preserve response correlation.
-        view.queryAvailable=view.open && view.ready && view.serverId && !view.waiting && !view.guildPending && !s->command && !s->jumpCommand && !view.jumpPending && !view.jumpRepeat && !view.queryCooldownMs;
+        view.queryAvailable=view.open && view.ready && view.serverId && !view.mail.pending && !view.waiting && !view.guildPending && !s->command && !s->jumpCommand && !view.jumpPending && !view.jumpRepeat && !view.queryCooldownMs;
         v.push_back(std::move(view));
     }return v;
 }
@@ -175,6 +179,7 @@ void QueryProxy::networkLoop(){
             if(candidate && direct && (owner=target(p))){
                 auto s=std::make_shared<Session>();s->https=p.destination.port==443;s->route={p.source,p.destination,{},p.sequence+1};s->route.alternatePort=p.destination.port==serverPort_?alternatePort_:loginAlternatePort_;
                 s->view.id=++nextConnection_;s->view.pid=owner;s->view.client=p.source;s->view.remote=p.destination;s->view.firstSequence=p.sequence+1;s->view.status="等待连接建立";s->createdAt=GetTickCount64();
+                s->ownerProcess=OpenProcess(SYNCHRONIZE,FALSE,owner);
                 sessions_.push_back(s);++active_;publishWire(*s,p);changed=rewriteQueryRoute(raw,out,s->route,listenPort_,alternatePort_);
                 diagnostics().write("query_route_created","connection="+std::to_string(s->view.id)+" route=system destination_port="+std::to_string(p.destination.port)+" server_port="+std::to_string(serverPort_));
             }
@@ -194,6 +199,15 @@ void QueryProxy::acceptLoop(){
         std::vector<std::shared_ptr<Session>> completed;
         {std::lock_guard lock(mutex_);const auto now=GetTickCount64();
             for(auto it=sessions_.begin();it!=sessions_.end();){auto s=*it;std::lock_guard sl(s->mutex);
+                // A process handle identifies the original process even if its PID
+                // is reused. Do not wait for a remote FIN after the game exits.
+                if(s->ownerProcess && WaitForSingleObject(s->ownerProcess,0)==WAIT_OBJECT_0){
+                    if(!s->closedAt)diagnostics().write("query_owner_exited","connection="+std::to_string(s->view.id));
+                    if(!s->accepted){s->accepted=true;s->closedAt=now;--active_;}
+                    if(s->client!=INVALID_SOCKET)shutdown(s->client,SD_BOTH);
+                    if(s->remote!=INVALID_SOCKET)shutdown(s->remote,SD_BOTH);
+                    CloseHandle(s->ownerProcess);s->ownerProcess=nullptr;
+                }
                 if(!s->accepted && now-s->createdAt>15000){s->accepted=true;s->closedAt=now;s->view.status="连接建立超时";--active_;}
                 // Retain closed route translations for late FIN/ACK retransmits.
                 // Never join a session thread while holding either mutex.
@@ -218,7 +232,7 @@ bool QueryProxy::request(size_t id,uint32_t server,uint64_t dbid){
 std::shared_ptr<QueryReceipt> QueryProxy::requestTracked(size_t id,uint32_t server,uint64_t dbid){
     try{encodeViewCharRequest(server,dbid);}catch(...){return {};}
     std::lock_guard lock(mutex_);for(auto& s:sessions_)if(s->view.id==id){std::lock_guard sl(s->mutex);
-        if(!s->view.open || !s->view.ready || !s->view.serverId || s->view.serverId!=server || s->view.guildPending || s->view.waiting || s->command || s->jumpCommand || s->view.jumpPending || s->view.jumpRepeat){
+        if(!s->view.open || !s->view.ready || !s->view.serverId || s->view.serverId!=server || s->mail.view.pending || s->view.guildPending || s->view.waiting || s->command || s->jumpCommand || s->view.jumpPending || s->view.jumpRepeat){
             if(s->view.serverId && s->view.serverId!=server){s->view.status="已拒绝跨区服查询：当前 "+std::to_string(s->view.serverId)+"，目标 "+std::to_string(server);diagnostics().write("query_server_mismatch","connection="+std::to_string(id)+" current="+std::to_string(s->view.serverId)+" target="+std::to_string(server));}
             return {};
         }
@@ -226,10 +240,18 @@ std::shared_ptr<QueryReceipt> QueryProxy::requestTracked(size_t id,uint32_t serv
         s->command=std::pair(server,dbid);s->queuedAt=GetTickCount64();s->view.waiting=true;s->view.response={};s->view.status="查询已排队，等待完整帧边界";return s->receipt;
     }return {};
 }
+bool QueryProxy::requestMail(size_t id,const MailRequest& request){
+    try{encodeMailRequest(request);}catch(...){return false;}
+    std::lock_guard lock(mutex_);for(auto& s:sessions_)if(s->view.id==id){std::lock_guard sl(s->mutex);
+        if(!s->view.open || !s->view.ready || s->https || s->mail.view.pending || s->view.guildPending || s->view.waiting || s->command || s->jumpCommand || s->view.jumpPending || s->view.jumpRepeat)return false;
+        if(!s->mail.queue(request,GetTickCount64()))return false;
+        diagnostics().write("mail_queued","connection="+std::to_string(id));return true;
+    }return false;
+}
 bool QueryProxy::requestGuild(size_t id,bool search,uint8_t order,std::string name){
     try{encodeGuildRequest(search,order,name);}catch(...){return false;}
     std::lock_guard lock(mutex_);for(auto& s:sessions_)if(s->view.id==id){std::lock_guard sl(s->mutex);
-        if(!s->view.open || !s->view.ready || s->view.guildPending || s->view.waiting || s->command || s->jumpCommand || s->view.jumpPending || s->view.jumpRepeat)return false;
+        if(!s->view.open || !s->view.ready || s->mail.view.pending || s->view.guildPending || s->view.waiting || s->command || s->jumpCommand || s->view.jumpPending || s->view.jumpRepeat)return false;
         s->guildCommand=Session::GuildCommand{search,order,std::move(name)};
         s->guildQueuedAt=GetTickCount64();s->guildSentAt=0;s->guildExpected=search?0x8a09:0x8a07;s->guildConflict=false;
         s->view.guildPending=true;s->view.guildResponse={};s->view.guildOpcode=0;s->view.guildStatus="军团查询已排队";
@@ -239,7 +261,7 @@ bool QueryProxy::requestGuild(size_t id,bool search,uint8_t order,std::string na
 bool QueryProxy::requestJump(size_t id){
     std::lock_guard lock(mutex_);for(auto& s:sessions_)if(s->view.id==id){std::lock_guard sl(s->mutex);
         auto now=GetTickCount64();
-        if(!s->view.open || !s->view.ready || s->view.guildPending || !s->view.jumpState.ready || s->view.jumpRepeat || s->view.waiting || s->command || s->jumpCommand || s->view.jumpPending || (s->lastJumpSent && now-s->lastJumpSent<5000))return false;
+        if(!s->view.open || !s->view.ready || s->mail.view.pending || s->view.guildPending || !s->view.jumpState.ready || s->view.jumpRepeat || s->view.waiting || s->command || s->jumpCommand || s->view.jumpPending || (s->lastJumpSent && now-s->lastJumpSent<5000))return false;
         s->jumpCommand=s->view.jumpPending=true;s->jumpQueuedAt=now;s->view.jumpStatus="完整跳跃已排队";
         diagnostics().write("jump_queued","connection="+std::to_string(id));return true;
     }return false;
@@ -253,7 +275,7 @@ bool QueryProxy::setJumpRepeat(size_t id,bool enabled,uint32_t intervalSeconds){
             s->view.jumpStatus=s->view.jumpPending?"已停止重复；正在发送的本次跳跃完成后结束":"已停止重复跳跃";
             diagnostics().write("jump_repeat_stopped","connection="+std::to_string(id));return true;
         }
-        if(!s->view.open || !s->view.ready || s->view.guildPending || !s->view.jumpState.ready || s->view.waiting || s->view.jumpPending || s->view.jumpRepeat)return false;
+        if(!s->view.open || !s->view.ready || s->mail.view.pending || s->view.guildPending || !s->view.jumpState.ready || s->view.waiting || s->view.jumpPending || s->view.jumpRepeat)return false;
         s->view.jumpRepeat=s->repeatArm=true;s->view.jumpIntervalSeconds=intervalSeconds;s->view.jumpNextInMs=0;
         s->view.jumpStatus="重复跳跃已开启，等待状态复核";
         diagnostics().write("jump_repeat_enabled","connection="+std::to_string(id)+" interval_seconds="+std::to_string(intervalSeconds));return true;
@@ -265,6 +287,7 @@ void QueryProxy::sessionLoop(std::shared_ptr<Session> s,SOCKET client){
     const bool opaque=login || s->https;
     Bytes loginPending[2];bool loginOpaque[2]{};
     bool clientEof=false,remoteEof=false,ours=false,native=false,ambiguous=false,disabled=false;
+    uint64_t halfClosedAt=0;
     std::string lastCipherStatus;
     uint64_t waitingSince=0;
     JumpTracker jump;
@@ -278,7 +301,13 @@ void QueryProxy::sessionLoop(std::shared_ptr<Session> s,SOCKET client){
         for(const auto& f:splitGameFrames(bytes).frames){
             auto frame=bytes.subspan(f.offset,f.length);auto op=uint16_t(readInteger(frame,f.prefixBytes,2,false));
             if(op==0xffff && !outbound){auto m=decodeGameFrame(frame,true);if(!m.expanded.empty())self(self,m.expanded,false,generated,depth+1);}
-            else if(outbound && !generated && (op==0x8a06 || op==0x8a08)){
+            else if(outbound && !generated && op==0xe201){
+                std::lock_guard lock(s->mutex);s->mail.nativeRequest(GetTickCount64());
+            }else if(!outbound && op==0xe202){
+                auto m=decodeGameFrame(frame,true);std::lock_guard lock(s->mutex);
+                diagnostics().write("mail_response","connection="+std::to_string(s->view.id)+" complete="+std::to_string(m.structureComplete)+" result="+(m.mailResult?std::to_string(*m.mailResult):"unknown"));
+                s->mail.receive(std::move(m));
+            }else if(outbound && !generated && (op==0x8a06 || op==0x8a08)){
                 std::lock_guard lock(s->mutex);
                 if(s->view.guildPending){s->guildConflict=true;s->view.guildStatus="游戏同时发起军团查询，响应归属无法确认";
                     if(s->guildCommand){s->guildCommand.reset();s->view.guildPending=false;s->view.guildStatus="未发送：游戏正在查询军团";}}
@@ -389,7 +418,25 @@ void QueryProxy::sessionLoop(std::shared_ptr<Session> s,SOCKET client){
         message("连接已接管，等待自动握手");
         std::array<uint8_t,65536> buffer{};
         while(!clientEof || !remoteEof){
+            if(clientEof || remoteEof){
+                if(!halfClosedAt)halfClosedAt=GetTickCount64();
+                if(GetTickCount64()-halfClosedAt>=15000)throw std::runtime_error("半关闭连接等待超时，释放代理连接");
+            }
             if(!forwarding_ || !running_)throw std::runtime_error("代理正在关闭");
+            Bytes mailWire;
+            {
+                std::lock_guard lock(s->mutex);auto now=GetTickCount64();s->mail.tick(now);
+                if(s->mail.command){
+                    if(disabled || native || ours || clientEof || remoteEof)s->mail.cancelQueued();
+                    else if(cipher.ready() && cipher.clientBoundary()){
+                        mailWire=cipher.mail(*s->mail.command);s->mail.submitted(now);s->view.shifted=true;
+                    }
+                }
+            }
+            if(!mailWire.empty()){
+                sendAll(remote,mailWire);observe();
+                diagnostics().write("mail_submitted","connection="+std::to_string(s->view.id)+" bytes="+std::to_string(mailWire.size()));
+            }
             Bytes guildWire;
             {
                 std::lock_guard lock(s->mutex);auto now=GetTickCount64();
@@ -507,6 +554,7 @@ void QueryProxy::sessionLoop(std::shared_ptr<Session> s,SOCKET client){
     }catch(const std::exception& e){message(std::string("连接结束：")+e.what());diagnostics().write("query_connection_error",e.what());jump.ended(GetTickCount64(),"transport_error");flushJumpEvidence();shutdown(client,SD_BOTH);if(remote!=INVALID_SOCKET)shutdown(remote,SD_BOTH);}
     {std::lock_guard lock(s->mutex);closesocket(client);if(remote!=INVALID_SOCKET)closesocket(remote);s->client=s->remote=INVALID_SOCKET;
         s->view.open=s->view.ready=s->view.waiting=false;s->command.reset();
+        s->mail.close();
         s->guildCommand.reset();if(s->view.guildPending)s->view.guildStatus="连接结束，军团查询未完成；不自动重试";s->view.guildPending=false;
         if(s->receipt)s->receipt->fail("game_connection_closed");
         if(s->view.jumpPending)s->view.jumpStatus="连接结束，未完成的跳跃消息不再发送，不自动重试";

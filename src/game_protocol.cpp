@@ -423,6 +423,46 @@ Bytes encodeGuildRequest(bool search,uint8_t order,std::string_view name) {
     else body.push_back(order);
     Bytes frame;var(frame,body.size()+4);frame.insert(frame.end(),body.begin(),body.end());return frame;
 }
+Bytes encodeMailRequest(const MailRequest& request){
+    if(request.type!=1 && request.type!=2)throw std::invalid_argument("邮件类型只支持个人（1）或军团（2）");
+    // Native SendSendMessageCard 0x148FBB5A0; string writer 0x14924CA50.
+    // UI advertises 50/500 characters. Count UTF-16 units conservatively until
+    // the game's supplementary-Unicode length policy is confirmed.
+    auto validate=[](std::string_view text,size_t limit,const char* label){
+        if(text.empty() || text.size()>limit*4 || text.find('\0')!=std::string_view::npos ||
+           !utf8Preview(std::span(reinterpret_cast<const uint8_t*>(text.data()),text.size())))
+            throw std::invalid_argument(std::string(label)+"不能为空，且必须是有效 UTF-8 文本");
+        size_t units=0;bool visible=false;
+        for(unsigned char c:text){if((c&0xc0)!=0x80)units+=c>=0xf0?2:1;visible|=c>32;}
+        if(!visible || units>limit)throw std::invalid_argument(std::string(label)+"超出长度限制或只有空白");
+    };
+    if(request.type==1 || !request.receiver.empty())validate(request.receiver,128,"收件字段（本地最多 128 字）");
+    validate(request.title,50,"标题（最多 50 字）");validate(request.body,500,"正文（最多 500 字）");
+    auto var=[](Bytes& b,size_t n){do{auto v=uint8_t(n&127);n>>=7;b.push_back(v|(n?128:0));}while(n);};
+    Bytes body{0x01,0xe2,request.type}; // EMessageCardType enum at 0x14DD9DEE0.
+    for(const auto* text:{&request.receiver,&request.title,&request.body}){var(body,text->size());body.insert(body.end(),text->begin(),text->end());}
+    Bytes frame;var(frame,body.size()+4);frame.insert(frame.end(),body.begin(),body.end());return frame;
+}
+std::string gameMailResultText(uint16_t result){
+    const char* text="未知错误";const char* symbol="";
+    // EResult enum table at 0x14DD42680..0x14DD42720 in the 2026-09-30 IDB.
+    switch(result){
+    case 0:text="发送成功";break;
+    case 0x217d:text="邮件内部错误";symbol="kMessageCard_InternalError";break;
+    case 0x217e:text="邮件不存在";symbol="kMessageCard_NotFound";break;
+    case 0x217f:text="标题过长";symbol="kMessageCardSend_TooLongTitle";break;
+    case 0x2180:text="正文过长";symbol="kMessageCardSend_TooLongBody";break;
+    case 0x2181:text="发送次数超限";symbol="kMessageCardSend_TooManySend";break;
+    case 0x2182:text="金币不足";symbol="kMessageCardSend_NotEnoughMoney";break;
+    case 0x2183:text="收件人不存在";symbol="kMessageCardSend_ReceiverNotFound";break;
+    case 0x2184:text="对方无法接收";symbol="kMessageCardSend_CannotReceive";break;
+    case 0x2185:text="等级不足";symbol="kMessageCardSend_NotEnoughLevel";break;
+    case 0x2186:text="收件人被屏蔽或受限";symbol="kMessageCardSend_ReceiverBlocked";break;
+    case 0x2187:text="发送冷却中";symbol="kMessageCardSend_Cooltime";break;
+    }
+    std::ostringstream out;out<<"返回码 "<<result<<" / 0x"<<std::uppercase<<std::hex<<std::setw(4)<<std::setfill('0')<<result<<"："<<text;
+    if(*symbol)out<<"（"<<symbol<<"）";return out.str();
+}
 GameFrames splitGameFrames(std::span<const uint8_t> bytes,size_t maxFrame) {
     GameFrames out;
     while(out.consumed<bytes.size()) {
@@ -500,6 +540,11 @@ GameMessage decodeGameFrame(std::span<const uint8_t> bytes,bool inboundPlaintext
                 if(opcode==0x8A06)r.u("排序（0 人数 / 1 排名）",1,"2026-09-30 SendGuildRecommendedList 0x148FF2C90");
                 else r.stringBytes("军团名称","2026-09-30 SendGuildSearchList 0x148FF31E0",true);
             }
+            else if(profile==GameProfile::World && opcode==0xE201){
+                const std::string ev="IDA SendSendMessageCard 0x148FBB5A0 / 属性表 0x14DC0D858";
+                m.name+=" 发送邮件请求";r.u("邮件类型（1 个人 / 2 军团）",1,ev);
+                r.stringBytes("收件人",ev,true);r.stringBytes("标题",ev,true);r.stringBytes("正文",ev,true);
+            }
             else if(profile==GameProfile::World && opcode==0x364F){
                 const std::string ev="SendViewChar 0x9090950 → 0x92C34D0；ViewChar_RQ 0xEDF92D0；线上宽度按写入函数核对";
                 m.name+=" 查看角色资料请求";
@@ -538,6 +583,13 @@ GameMessage decodeGameFrame(std::span<const uint8_t> bytes,bool inboundPlaintext
             supported=loginFields(r,opcode);if(!supported)m.status="登录服务正文结构尚未确认";
         } else {
         switch(opcode) {
+        case 0xE202: {
+            const std::string ev="IDA 0x1491C1220 / SendMessageCard_RS 属性表 0x14DC09338";
+            m.name+=" 发送邮件响应";m.mailResult=uint16_t(r.u("结果码",2,ev));
+            r.out.fields.back().value=gameMailResultText(*m.mailResult);
+            r.u("下次发送次数重置时间（Unix 毫秒）",8,ev);
+            r.u("个人邮件已发送次数",1,ev);r.u("军团邮件已发送次数",1,ev);break;
+        }
         case 0xE200: {
             const std::string ev="IDA 0x929DAC0 → 0x93166C0 → 0x909B5A0；MessageCardInitData_NT 0xEE09F38";
             m.name+=" 留言卡初始化";auto n=r.count("留言卡数量",ev,36);

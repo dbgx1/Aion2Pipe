@@ -1,11 +1,18 @@
 ---
 name: aion2pipe-package
-description: Build, verify, and package Aion2Pipe portable Windows releases without polluting the source directory or Git uploads. Use for release ZIP creation, distribution, repackaging, and changes to packaging scripts or output layout.
+description: Build, verify, and package Aion2Pipe portable Windows releases with a version and timestamp in every package name, without polluting the source directory or Git uploads. Use for release ZIP creation, distribution, repackaging, and changes to packaging scripts or output layout.
 ---
 
 # Package Aion2Pipe
 
 Create a self-contained portable release with `scripts/package.ps1`.
+
+## Version and packaging time
+
+- Every release directory and ZIP must use `Aion2Pipe-<version>-<yyyyMMdd-HHmmss>-UTC8-win64-portable`. Example: `Aion2Pipe-1.2.3-20261003-143025-UTC8-win64-portable.zip`.
+- Pass the release version explicitly using `-Version`. Use the user's version when specified; otherwise follow the project's existing release version convention. A timestamp is not a substitute for the version.
+- The script generates the timestamp once at packaging start, in UTC+08:00 (Asia/Shanghai), including seconds. Directory and ZIP names must use the same value. Repackaging the same version generates a new timestamp; never reuse an old timestamp or overwrite an existing package.
+- Include `build-info.json` with the version, package name and ISO 8601 packaging start time. Include this file in the manifest and SHA-256 checksums.
 
 ## Directory and Git rules
 
@@ -16,7 +23,7 @@ Use the repository root containing this skill; never assume a drive letter or co
 | C++ build and intermediate files | `build/` |
 | Downloaded dependencies | `third_party/` |
 | Python environment and chat build output | `chat_bridge/.python/`, `chat_bridge/.venv-local/`, `chat_bridge/build/`, `chat_bridge/dist/` |
-| Complete release directory and ZIP | `release/Aion2Pipe-<version>-win64-portable/` and the matching `.zip` |
+| Complete release directory and ZIP | `release/Aion2Pipe-<version>-<yyyyMMdd-HHmmss>-UTC8-win64-portable/` and the matching `.zip` |
 | Temporary scripts, test reports, screenshots, captures and packaging logs | `artifacts/packaging/<version>/` |
 | Actual credentials and private build inputs | `private/` |
 

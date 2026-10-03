@@ -25,6 +25,9 @@ static void streamTests(){
         check(crypt(q.guild(false,0,""),receiver)==encodeGuildRequest(false,0),"guild list advances upstream cipher only");
         auto longName=std::string(128,'x');check(crypt(q.guild(true,0,longName),receiver)==encodeGuildRequest(true,0,longName),"guild multi-byte frame prefix not encrypted");
         rejects([&]{q.guild(true,0,"");},"invalid guild request cannot advance cipher");
+        MailRequest mail{"Test",std::string(50,'t'),std::string(500,'b')};
+        check(crypt(q.mail(mail),receiver)==encodeMailRequest(mail),"mail insertion preserves multi-byte prefix and server cipher");
+        rejects([&]{q.mail({"","",""});},"invalid mail cannot advance cipher");
         Bytes plain=heartbeat();append(plain,encodeViewCharRequest(99,123456));append(plain,heartbeat());auto wire=crypt(plain,sender);Bytes relayed;
         for(auto byte:wire){Bytes one{byte};append(relayed,q.feed(one));}
         check(relayed!=wire && crypt(relayed,receiver)==plain,"post insertion both ciphers remain synchronized across byte fragments");
@@ -36,6 +39,7 @@ static void streamTests(){
         wire=crypt(heartbeat(),sender);check(q.feed(std::span(wire).first(1)).empty(),"armed incomplete frame held");
         rejects([&]{q.query(1,2);},"no insertion inside frame");
         rejects([&]{q.guild(false,0,"");},"no guild insertion inside frame");
+        rejects([&]{q.mail(mail);},"no mail insertion inside frame");
         check(crypt(q.feed(std::span(wire).subspan(1)),receiver)==heartbeat(),"partial frame completes after rejected insertion");
     }
     QueryStream q(a,b,initial.frameSequence);q.feed(encrypted);
@@ -98,6 +102,9 @@ static void handshakeTests(){
         CipherSnapshot c;c.i=1;for(unsigned i=0;i<256;++i)c.table[i]=uint8_t(i);unsigned j=0;for(unsigned i=0;i<256;++i){j=(j+c.table[i]+secret[i%secret.size()])%256;std::swap(c.table[i],c.table[j]);}auto receiver=c;
         for(int i=0;i<3;++i){auto wire=crypt(heartbeat(),c);check(mitm.fromClient(wire)==wire,"automatic initial cipher relays unmodified");crypt(wire,receiver);}
         check(mitm.ready(),"three parsed frames enable fully automatic queries");
+        MailRequest mail{"Player","Test","Body"};
+        check(crypt(mitm.mail(mail),receiver)==encodeMailRequest(mail),"mail uses synchronized server cipher");
+        check(mitm.observations.size()==1 && mitm.observations[0].toolGenerated && mitm.observations[0].plain==encodeMailRequest(mail),"mail plaintext observation");
         JumpRequest jump{{1,2,3},90,{0,0,1000},10000};
         check(crypt(mitm.jump(jump),receiver)==encodeJumpRequest(jump),"jump uses server cipher without shifting native client cipher");
         check(mitm.observations.size()==1 && mitm.observations[0].toolGenerated && mitm.observations[0].plain==encodeJumpRequest(jump),"generated jump is recorded with source and plaintext");

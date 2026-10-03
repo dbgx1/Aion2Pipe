@@ -67,6 +67,11 @@ void QueryStream::initialize(std::span<const uint8_t> key){
     uint8_t j=0;for(unsigned i=0;i<256;++i){j=uint8_t(j+state.table[i]+key[i%key.size()]);std::swap(state.table[i],state.table[j]);}
     client_=server_=state;confirmed_=0;history_.clear();
 }
+Bytes QueryStream::mail(const MailRequest& request){
+    if(!ready() || !verified() || !boundary())throw std::runtime_error("邮件发送需要已验证的完整帧边界");
+    auto wire=encodeMailRequest(request);auto frames=splitGameFrames(wire);
+    server_->transform(std::span(wire).subspan(frames.frames.front().prefixBytes));shifted_=true;return wire;
+}
 Bytes QueryStream::guild(bool search,uint8_t order,std::string_view name){
     if(!ready() || !verified() || !boundary())throw std::runtime_error("军团查询需要已验证的完整帧边界");
     auto wire=encodeGuildRequest(search,order,name);

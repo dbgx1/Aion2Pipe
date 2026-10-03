@@ -788,12 +788,47 @@ void App::guildView(){
         }ImGui::EndTabBar();
     }
 }
+void App::mailDebugView(const QueryConnection* c){
+    if(!ImGui::CollapsingHeader("邮件测试",ImGuiTreeNodeFlags_DefaultOpen))return;
+    ImGui::SetNextItemWidth(220);
+    if(ImGui::Combo("邮件类型",&mailType_,"个人（1）\0军团（2）\0")){mailPreview_.clear();mailNotice_.clear();}
+    if(mailType_==0)ImGui::TextWrapped("个人邮件：填写收件角色名。游戏页面显示每封 500 金币、每天最多 20 封；实际限制以服务器响应为准。");
+    else ImGui::TextWrapped("军团邮件（实验）：类型值为 2。收件字段允许留空；目标范围、权限和费用尚未实测确认，以游戏规则及服务器响应为准。");
+    ImGui::SetNextItemWidth(500);ImGui::InputText(mailType_==0?"收件人":"收件字段（可留空）",mailReceiver_,sizeof(mailReceiver_));
+    ImGui::SetNextItemWidth(500);ImGui::InputText("标题（最多 50 字）",mailTitle_,sizeof(mailTitle_));
+    ImGui::InputTextMultiline("正文（最多 500 字）",mailBody_,sizeof(mailBody_),ImVec2(500,110));
+    MailRequest request{mailReceiver_,mailTitle_,mailBody_,uint8_t(mailType_+1)};std::string error;
+    try{encodeMailRequest(request);}catch(const std::exception& e){error=e.what();}
+    ImGui::BeginDisabled(!error.empty());
+    if(ImGui::Button("构造明文包（不发送）"))mailPreview_=hex(encodeMailRequest(request));
+    ImGui::EndDisabled();
+    if(!mailPreview_.empty()){
+        ImGui::SameLine();if(ImGui::Button("复制上次构造的包"))ImGui::SetClipboardText(mailPreview_.c_str());
+        if(ImGui::TreeNode("上次构造的明文包")){ImGui::TextWrapped("%s",mailPreview_.c_str());ImGui::TreePop();}
+    }
+    const bool available=c && c->open && c->ready && !c->waiting && !c->guildPending && !c->jumpPending && !c->jumpRepeat &&
+        !c->mail.pending && !c->mail.blocked && !c->mail.nativePending;
+    ImGui::BeginDisabled(!available || !error.empty());
+    if(ImGui::Button("发送一封测试邮件（消耗金币）"))
+        mailNotice_=queryProxy_.requestMail(c->id,request)?"已排队；只发送一次，等待服务器确认":"未排队：连接状态已变化";
+    ImGui::EndDisabled();
+    if(!error.empty())ImGui::TextDisabled("%s",error.c_str());
+    if(!mailNotice_.empty())ImGui::TextWrapped("%s",mailNotice_.c_str());
+    if(c){
+        ImGui::TextWrapped("邮件状态：%s",c->mail.status.c_str());
+        ImGui::Text("本连接提交次数：%llu",static_cast<unsigned long long>(c->mail.sent));
+        if(!c->mail.response.fields.empty() && ImGui::TreeNode("最近邮件响应字段")){
+            for(const auto& field:c->mail.response.fields)ImGui::TextWrapped("%s：%s",field.name.c_str(),field.value.c_str());
+            ImGui::TreePop();
+        }
+    }
+    ImGui::TextDisabled("15 秒超时后结果为未知，不重发；发送期间请勿同时在游戏内发邮件。请求正文可在数据包分析中查看。");
+}
 void App::debugView(){
-    ImGui::TextUnformatted("跳跃 · 完整序列与重复发送（实验）");
-    ImGui::TextWrapped("先启用透明代理并重新登录。在平地停稳后即可发送，无需先手动跳跃；若还没有停止位置，走一步再停下即可。");
-    ImGui::TextWrapped("自动生成平地起跳、空中更新、下落和停止消息；已有本次原生轨迹时优先使用。仅适用于平地原地，纯网络发送不会直接触发本机动画。");
+    ImGui::TextUnformatted("调试 · 使用当前世界代理连接");
     auto connections=queryProxy_.connections();std::erase_if(connections,[](const auto& c){return !c.open || c.remote.port==13700;});
     if(connections.empty()){
+        mailDebugView(nullptr);
         ImGui::TextDisabled("没有正在运行的世界代理连接。离线文件不能发送动作。");
         ImGui::BeginDisabled();ImGui::Button("跳跃一次（完整序列）");ImGui::EndDisabled();return;
     }
@@ -807,13 +842,17 @@ void App::debugView(){
     selected=std::find_if(connections.begin(),connections.end(),[&](const auto& c){return c.id==debugConnection_;});
     const auto& c=*selected;const auto& jump=c.jumpState;
     ImGui::TextWrapped("连接状态：%s",c.status.c_str());
+    mailDebugView(&c);
+    ImGui::Separator();
+    ImGui::TextUnformatted("跳跃 · 完整序列与重复发送（实验）");
+    ImGui::TextWrapped("在平地停稳后即可发送，无需先手动跳跃；若还没有停止位置，走一步再停下即可。纯网络发送不会直接触发本机动画。");
     ImGui::TextWrapped("动作状态：%s",jump.status.c_str());
     if(jump.grounded){ImGui::Text("最近地面位置：%.3f  %.3f  %.3f",jump.request.position[0],jump.request.position[1],jump.request.position[2]);
         ImGui::Text("位置距今：%.2f 秒；朝向：%.3f",double(jump.ageMs)/1000,jump.request.rotation);}
     if(jump.simulated)ImGui::Text("独立平地模型：%llu 条消息，%.3f 秒；无需学习轨迹",static_cast<unsigned long long>(jump.trajectoryFrames),double(jump.trajectoryDurationMs)/1000);
     if(jump.learned)ImGui::Text("已记录轨迹：%llu 条消息，%.2f 秒；起跳速度：%.3f",static_cast<unsigned long long>(jump.trajectoryFrames),double(jump.trajectoryDurationMs)/1000,jump.request.velocity[2]);
     if(jump.stopPositionUnconfirmed)ImGui::TextWrapped("已收到停止消息，但停止位置尚未解析；显示的是最后一次地面位置上报。");
-    ImGui::BeginDisabled(!c.ready || !jump.ready || c.jumpPending || c.waiting || c.jumpRepeat);
+    ImGui::BeginDisabled(!c.ready || !jump.ready || c.jumpPending || c.waiting || c.jumpRepeat || c.guildPending || c.mail.pending);
     if(ImGui::Button("跳跃一次（完整序列）"))if(!queryProxy_.requestJump(c.id))message_="起跳未排队：连接或动作状态已变化，请查看调试页。";
     ImGui::EndDisabled();ImGui::SameLine();ImGui::TextDisabled("至少间隔 5 秒；超时不重发。");
     static int repeatIntervalSeconds=5;
@@ -824,7 +863,7 @@ void App::debugView(){
         if(ImGui::Button("停止重复（本次完成后）"))queryProxy_.setJumpRepeat(c.id,false);
         ImGui::SameLine();ImGui::Text("每 %u 秒一次；距下次 %.1f 秒",c.jumpIntervalSeconds,double(c.jumpNextInMs)/1000);
     }else{
-        ImGui::BeginDisabled(!c.ready || !jump.ready || c.jumpPending || c.waiting);
+        ImGui::BeginDisabled(!c.ready || !jump.ready || c.jumpPending || c.waiting || c.guildPending || c.mail.pending);
         if(ImGui::Button("开始重复跳跃"))if(!queryProxy_.setJumpRepeat(c.id,true,uint32_t(repeatIntervalSeconds)))message_="重复跳跃未启动，请确认位置与连接状态。";
         ImGui::EndDisabled();
     }
@@ -867,7 +906,7 @@ void App::reportView(){
 }
 void App::queryWorkerView(){
     ImGui::TextUnformatted("控制台在线查询服务");
-    ImGui::TextWrapped("启用后，网页控制台只会把与本机当前游戏区服一致的玩家在线查询分配给本机。每次只执行一个任务，切换角色或区服后会自动重新识别。");
+    ImGui::TextWrapped("启用后，网页控制台只会把与本机当前游戏区服一致的玩家在线查询分配给本机。每包最多 50 人，本机逐个连续查询，整包完成后一次回传；每包限时 100 秒。切换角色或区服后会自动重新识别。");
     if(!queryWorker_){
         try{
             queryWorker_=std::make_unique<QueryWorker>(queryProxy_,CharacterReporter::defaultDirectory().parent_path()/L"query-worker");

@@ -25,6 +25,7 @@ struct GameMessage {
     std::vector<SkinEquipment> skins;
     bool skinsComplete{};
     std::optional<uint16_t> queryResult; // Available even when a rejected response tail is truncated.
+    std::optional<uint16_t> mailResult;
     bool viewCharPrefixComplete{}; // Independent of appearance-tail support.
 };
 Bytes decompressLz4Block(std::span<const uint8_t> bytes,size_t expected,size_t limit=8*1024*1024);
@@ -37,6 +38,10 @@ std::optional<uint16_t> selfServerId(const GameMessage& message);
 std::string gameQueryResultText(uint16_t result);
 Bytes encodeViewCharRequest(uint32_t serverId,uint64_t characterDbid);
 Bytes encodeGuildRequest(bool search, uint8_t order=0, std::string_view name={});
+struct MailRequest {std::string receiver,title,body;uint8_t type=1;};
+// Character=1, Guild=2; strings are UTF-8 with ULEB128 byte lengths.
+Bytes encodeMailRequest(const MailRequest& request);
+std::string gameMailResultText(uint16_t result);
 struct CipherSnapshot {
     Endpoint source,destination;
     uint32_t frameSequence{};

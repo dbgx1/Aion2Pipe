@@ -2,6 +2,7 @@
 #include "query_credential.hpp"
 #include "reconnect_backoff.hpp"
 #include "query_history.hpp"
+#include "query_batch.hpp"
 #include "diagnostics.hpp"
 #include <windows.h>
 #include <wincrypt.h>
@@ -34,7 +35,7 @@ uint64_t decimal(const Json& task,const char* name,uint64_t max){
     const auto result=std::from_chars(text.data(),text.data()+text.size(),value);
     if(result.ec!=std::errc{} || result.ptr!=text.data()+text.size() || !value || value>max)throw std::invalid_argument("Invalid target identifier");return value;
 }
-struct Record {Json task,event;int64_t expires{};uint16_t packetId{};bool acknowledged{};};
+struct Record {std::string batchId;Json task,event;int64_t expires{};uint16_t packetId{};bool acknowledged{};};
 }
 struct QueryWorker::Impl {
     QueryProxy& proxy;std::filesystem::path directory;
@@ -56,6 +57,8 @@ struct QueryWorker::Impl {
         {std::lock_guard lock(mutex);status.sessionId=session;}
         MqttConfig mqttConfig;mqttConfig.clientId="query-"+settings.clientId+"-"+session;mqttConfig.username="query-"+settings.clientId;mqttConfig.password=std::move(settings.password);mqttConfig.topic=base+"/task";
         QueryHistory<Record> history;auto& records=history.entries;
+        QueryHistory<QueryBatch> batchHistory;auto& batches=batchHistory.entries;std::string runningBatch;
+        std::map<std::string,std::pair<int64_t,std::set<std::string>>> cancellations;
         std::shared_ptr<QueryReceipt> active;std::string activeId,gameSession="none";
         uint32_t activeServer=0;
         size_t connectionId=0;uint64_t seq=0;int64_t nextState=0,nextInspect=0;std::string previousState;
@@ -73,6 +76,8 @@ struct QueryWorker::Impl {
                 while(!stopping && !stopRequested){
                     const auto now=nowMs();
                     history.prune(now,activeId);
+                    batchHistory.prune(now,active && !records.at(activeId).batchId.empty()?records.at(activeId).batchId:runningBatch);
+                    for(auto it=cancellations.begin();it!=cancellations.end();)if(it->second.first<=now)it=cancellations.erase(it);else ++it;
                     if(active){
                         const auto outcome=active->snapshot();
                         auto& r=records.at(activeId);
@@ -81,44 +86,111 @@ struct QueryWorker::Impl {
                             r.event={{"type",completed?"completed":"failed"},{"taskId",r.task.at("taskId")},{"attemptId",activeId},{"gameSessionId",r.task.at("gameSessionId")},
                                 {"status",completed?outcome.presence:"unknown"}};
                             if(!completed){
-                                const auto error=now>=r.expires?std::string("task_expired"):outcome.error;r.event["error"]=error;
+                                const auto error=now>=r.expires?std::string(r.batchId.empty()?"task_expired":"batch_timeout"):outcome.error;r.event["error"]=error;
                                 diagnostics().write("query_worker_failed","connection="+std::to_string(connectionId)+" reason="+error);
                                 std::lock_guard lock(mutex);status.lastError=error;
                             }
                             r.packetId=0;r.acknowledged=false;
+                            if(!r.batchId.empty())batches.at(r.batchId).add(r.event,now);
                             {std::lock_guard lock(mutex);if(completed)++status.completed;else ++status.failed;status.busy=false;status.target.clear();}
                             active.reset();activeId.clear();nextInspect=0;
+                        }
+                    }
+                    if(!runningBatch.empty()){
+                        auto& batch=batches.at(runningBatch);
+                        if(now>=batch.expires)batch.fail("batch_timeout",now);
+                        if(batch.done()){
+                            runningBatch.clear();nextInspect=0;
+                        }else if(!active){
+                            const auto live=proxy.connections();const auto current=std::find_if(live.begin(),live.end(),[&](const QueryConnection& view){return view.id==connectionId;});
+                            if(current==live.end() || !current->open || !current->ready || current->serverId!=activeServer || batch.task.at("gameSessionId")!=gameSession){
+                                batch.fail("game_session_changed",now);
+                            }else if(current->queryAvailable){
+                                const auto task=batch.next();const auto attempt=task.at("attemptId").get<std::string>();
+                                Record record;record.task=task;record.expires=batch.expires;record.batchId=runningBatch;
+                                records.emplace(attempt,std::move(record));
+                                active=proxy.requestTracked(connectionId,uint32_t(decimal(task,"serverId",65535)),decimal(task,"characterId",0x7fffffffffffffffULL));
+                                if(active){activeId=attempt;std::lock_guard lock(mutex);status.busy=true;status.target=std::to_string(batch.results.size()+1)+" / "+std::to_string(batch.task.at("tasks").size());}
+                                else batch.fail("game_connection_busy",now);
+                            }
                         }
                     }
                     if(now>=nextInspect){
                         auto views=proxy.connections();const QueryConnection* chosen=nullptr;
                         for(const auto& view:views)if(view.id==connectionId && view.open && view.ready){chosen=&view;break;}
-                        if(!active && (!chosen || !chosen->queryAvailable))for(const auto& view:views)if(view.queryAvailable){chosen=&view;break;}
-                        if(!chosen && !active)for(const auto& view:views)if(view.open && view.ready){chosen=&view;break;}
-                        if(!active){
+                        if(!active && runningBatch.empty() && (!chosen || !chosen->queryAvailable))for(const auto& view:views)if(view.queryAvailable){chosen=&view;break;}
+                        if(!chosen && !active && runningBatch.empty())for(const auto& view:views)if(view.open && view.ready){chosen=&view;break;}
+                        if(!active && runningBatch.empty()){
                             connectionId=chosen?chosen->id:0;activeServer=chosen?chosen->serverId:0;
                             gameSession=chosen && activeServer?"g-"+std::to_string(chosen->id)+"-s-"+std::to_string(activeServer):"none";
                         }
-                        const bool ready=chosen && chosen->queryAvailable && !active && history.ready();
+                        const bool ready=chosen && chosen->queryAvailable && !active && runningBatch.empty() && history.entries.size()+50<QueryHistory<Record>::Capacity && batchHistory.ready();
                         const auto cooldown=chosen?chosen->queryCooldownMs:0;
                         const auto stateKey=gameSession+":"+std::to_string(activeServer)+(ready?":ready":":busy");
                         // Do not publish a heartbeat for every decreasing cooldown value.
                         if(stateKey!=previousState || now>=nextState){
-                            mqtt.publish(base+"/state",Json{{"clientId",settings.clientId},{"sessionId",session},{"gameSessionId",gameSession},{"serverId",activeServer?Json(std::to_string(activeServer)):Json(nullptr)},{"boot",generation},{"seq",++seq},{"ready",ready},{"cooldownMs",cooldown}}.dump());
+                            mqtt.publish(base+"/state",Json{{"clientId",settings.clientId},{"sessionId",session},{"gameSessionId",gameSession},{"serverId",activeServer?Json(std::to_string(activeServer)):Json(nullptr)},{"boot",generation},{"seq",++seq},{"ready",ready},{"cooldownMs",cooldown},{"batchSize",50}}.dump());
                             previousState=stateKey;nextState=now+heartbeatInterval;
                         }
-                        {std::lock_guard lock(mutex);status.ready=ready;status.serverId=activeServer?std::to_string(activeServer):"";status.message=active?"正在执行控制台查询":ready?"可领取同区服查询任务":!history.ready()?"任务记录暂满，等待过期记录清理":chosen && !chosen->serverId?"等待识别当前游戏区服":chosen?"等待当前查询结束":"等待游戏查询连接";}
+                        {std::lock_guard lock(mutex);status.ready=ready;status.serverId=activeServer?std::to_string(activeServer):"";status.busy=bool(active)||!runningBatch.empty();status.message=(active || !runningBatch.empty())?"正在执行控制台查询":ready?"可领取同区服查询任务":!history.ready()?"任务记录暂满，等待过期记录清理":chosen && !chosen->serverId?"等待识别当前游戏区服":chosen?"等待当前查询结束":"等待游戏查询连接";}
                         nextInspect=now+250;
                     }
-                    for(auto& [id,r]:records)if(!r.event.is_null() && !r.acknowledged && !r.packetId && now<r.expires+10000){
+                    for(auto& [id,r]:records)if(r.batchId.empty() && !r.event.is_null() && !r.acknowledged && !r.packetId && now<r.expires+10000){
                         r.packetId=mqtt.publish(base+"/events",r.event.dump());break;
+                    }
+                    for(auto& [id,batch]:batches)if(batch.done() && !batch.acknowledged && now>=batch.nextPublish && now<batch.expires+10000){
+                        mqtt.publish(base+"/events",batch.report().dump());batch.nextPublish=now+2000;break;
                     }
                     if(auto publication=mqtt.poll(100)){
                         if(stopRequested){mqtt.acknowledge(publication->id);continue;}
                         if(publication->topic!=mqttConfig.topic || publication->retained){mqtt.acknowledge(publication->id);continue;}
                         Json task,overflowEvent;std::string attempt;
                         try{
-                            task=Json::parse(publication->payload);attempt=task.at("attemptId").get<std::string>();
+                            task=Json::parse(publication->payload);
+                            const auto type=task.at("type").get<std::string>();
+                            if(type=="query_result_ack"){
+                                if(task.size()!=2 || !identifier(task.at("batchId").get<std::string>()))throw std::invalid_argument("Invalid acknowledgement");
+                                if(auto it=batches.find(task.at("batchId").get<std::string>());it!=batches.end())it->second.acknowledged=true;
+                                mqtt.acknowledge(publication->id);continue;
+                            }
+                            if(type=="cancel_query_tasks"){
+                                const auto id=task.at("batchId").get<std::string>();
+                                if(task.size()!=3 || !identifier(id) || !task.at("attemptIds").is_array() || task.at("attemptIds").size()>50)throw std::invalid_argument("Invalid cancellation");
+                                std::set<std::string> cancelled;
+                                for(const auto& value:task.at("attemptIds")){auto target=value.get<std::string>();if(!identifier(target))throw std::invalid_argument("Invalid cancellation");cancelled.insert(target);}
+                                if(auto it=batches.find(id);it!=batches.end())it->second.fail("cancelled",now,&cancelled);
+                                else if(cancellations.size()<4096){auto& pending=cancellations[id];pending.first=now+110000;pending.second.insert(cancelled.begin(),cancelled.end());}
+                                mqtt.acknowledge(publication->id);continue;
+                            }
+                            if(type=="query_players_online"){
+                                const auto received=nowMs();QueryBatch batch(task,received);
+                                const auto id=task.at("batchId").get<std::string>();
+                                if(!identifier(id) || !identifier(task.at("gameSessionId").get<std::string>()))throw std::invalid_argument("Invalid batch identity");
+                                for(const auto& item:task.at("tasks")){
+                                    if(!identifier(item.at("attemptId").get<std::string>()) || !identifier(item.at("taskId").get<std::string>()))throw std::invalid_argument("Invalid task identity");
+                                    decimal(item,"serverId",65535);decimal(item,"characterId",0x7fffffffffffffffULL);
+                                }
+                                if(auto it=batches.find(id);it!=batches.end()){
+                                    if(it->second.task!=task)throw std::invalid_argument("Batch identity changed");
+                                    it->second.acknowledged=false;it->second.nextPublish=0;std::lock_guard lock(mutex);++status.duplicates;
+                                }else{
+                                    if(batchHistory.full())throw std::invalid_argument("Batch history full");
+                                    std::string rejection;
+                                    if(batch.expires<=received)rejection="batch_timeout";
+                                    else if(active || !runningBatch.empty() || records.size()+task.at("tasks").size()>=QueryHistory<Record>::Capacity)rejection="client_busy";
+                                    else if(task.at("gameSessionId")!=gameSession || !connectionId)rejection="game_session_changed";
+                                    for(const auto& item:task.at("tasks")){
+                                        if(decimal(item,"serverId",65535)!=activeServer)rejection="server_mismatch";
+                                        if(records.contains(item.at("attemptId").get<std::string>()))throw std::invalid_argument("Attempt already used");
+                                    }
+                                    if(!rejection.empty())batch.fail(rejection,received);
+                                    if(auto cancelled=cancellations.find(id);cancelled!=cancellations.end()){batch.fail("cancelled",received,&cancelled->second.second);cancellations.erase(cancelled);}
+                                    const bool done=batch.done();batches.emplace(id,std::move(batch));if(!done)runningBatch=id;
+                                    nextInspect=0;
+                                }
+                                mqtt.acknowledge(publication->id);continue;
+                            }
+                            attempt=task.at("attemptId").get<std::string>();
                             if(!task.is_object() || task.size()!=7 || task.at("type")!="query_player_online" || !identifier(attempt) ||
                                !identifier(task.at("taskId").get<std::string>()) || !identifier(task.at("gameSessionId").get<std::string>()) || !task.at("expiresAt").is_number_integer())throw std::invalid_argument("Invalid task");
                             const auto expires=task.at("expiresAt").get<int64_t>();const auto received=nowMs();
@@ -140,7 +212,7 @@ struct QueryWorker::Impl {
                                 std::string rejection;
                                 if(expires<=received || expires>received+30000)rejection="task_expired";
                                 else if(task.at("gameSessionId")!=gameSession || !connectionId)rejection="game_session_changed";
-                                else if(active)rejection="client_busy";
+                                else if(active || !runningBatch.empty())rejection="client_busy";
                                 else if(server!=activeServer)rejection="server_mismatch";
                                 else {
                                     const auto live=proxy.connections();const auto current=std::find_if(live.begin(),live.end(),[&](const QueryConnection& view){return view.id==connectionId;});
@@ -154,7 +226,10 @@ struct QueryWorker::Impl {
                                 else{activeId=attempt;std::lock_guard lock(mutex);status.busy=true;status.target=std::to_string(server)+" / "+std::to_string(character);}
                                 nextInspect=0;
                             }
-                        }catch(const std::exception&){std::lock_guard lock(mutex);++status.failed;status.message="已忽略无效或冲突的查询任务";}
+                        }catch(const std::exception& e){
+                            diagnostics().write("query_task_invalid",e.what());
+                            std::lock_guard lock(mutex);++status.failed;status.lastError=e.what();status.message="已忽略无效或冲突的查询任务";
+                        }
                         if(!overflowEvent.is_null())mqtt.publish(base+"/events",overflowEvent.dump());
                         mqtt.acknowledge(publication->id);
                     }

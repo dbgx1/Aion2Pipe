@@ -1,5 +1,6 @@
 ﻿#include "ui.hpp"
 #include "diagnostics.hpp"
+#include "startup_guard.hpp"
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx11.h>
@@ -15,13 +16,14 @@ static ComPtr<IDXGISwapChain> swapChain;
 static ComPtr<ID3D11RenderTargetView> target;
 static UINT resizeWidth=0,resizeHeight=0;
 static aion::App* currentApp=nullptr;
+static bool closeRequested=false;
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND,UINT,WPARAM,LPARAM);
 static LRESULT WINAPI windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
     if(ImGui_ImplWin32_WndProcHandler(window,message,w,l)) return true;
     if(message==WM_SIZE) {if(w!=SIZE_MINIMIZED){resizeWidth=LOWORD(l);resizeHeight=HIWORD(l);} return 0;}
     if(message==WM_SYSCOMMAND && (w&0xfff0)==SC_KEYMENU) return 0;
     if(message==WM_DESTROY) {PostQuitMessage(0); return 0;}
-    if(message==WM_CLOSE && currentApp && !currentApp->canClose()){ShowWindow(window,SW_RESTORE);return 0;}
+    if(message==WM_CLOSE && currentApp && !currentApp->canClose()){closeRequested=true;ShowWindow(window,SW_RESTORE);return 0;}
     return DefWindowProcW(window,message,w,l);
 }
 static bool createTarget() {
@@ -49,6 +51,25 @@ static bool screenshot() {
     context->Unmap(staging.Get(),0); out.close(); return bool(out);
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int) {
+    // Own the singleton before starting diagnostics, proxy listeners or MQTT.
+    struct InstanceGuard { HANDLE handle{}; ~InstanceGuard(){if(handle)CloseHandle(handle);} } guard;
+    guard.handle=CreateMutexW(nullptr,FALSE,L"Local\\Aion2Pipe.Desktop.Instance");
+    const auto instanceError=GetLastError();
+    const auto existingWindow=FindWindowW(L"Aion2PipeWindow",nullptr);
+    if(existingWindow || (guard.handle && instanceError==ERROR_ALREADY_EXISTS)) {
+        if(existingWindow){ShowWindow(existingWindow,SW_RESTORE);SetForegroundWindow(existingWindow);}
+        else MessageBoxW(nullptr,L"Aion2Pipe 已启动，正在初始化。请勿重复启动。",L"Aion2Pipe",MB_OK|MB_ICONINFORMATION);
+        return 0;
+    }
+    if(!guard.handle){MessageBoxW(nullptr,L"无法取得程序运行锁，请检查是否已有 Aion2Pipe 正在运行。",L"Aion2Pipe",MB_OK|MB_ICONERROR);return 1;}
+    if(const auto other=aion::otherPipeProcess()) {
+        const auto message=L"检测到尚未退出的 Aion2Pipe（PID "+std::to_wstring(other)+L"）。请等待它退出后再启动。";
+        MessageBoxW(nullptr,message.c_str(),L"Aion2Pipe",MB_OK|MB_ICONINFORMATION);return 0;
+    }
+    if(const auto bridge=aion::cleanOrphanChatBridges()) {
+        const auto message=L"聊天组件仍由其他程序管理或无法清理（PID "+std::to_wstring(bridge)+L"），已阻止重复启动。";
+        MessageBoxW(nullptr,message.c_str(),L"Aion2Pipe",MB_OK|MB_ICONINFORMATION);return 1;
+    }
     aion::initializeDiagnostics();
     WSADATA wsa{};auto wsaResult=WSAStartup(MAKEWORD(2,2),&wsa);if(wsaResult){aion::diagnostics().write("startup_error","WSAStartup="+std::to_string(wsaResult));return 1;}
     ImGui_ImplWin32_EnableDpiAwareness();
@@ -92,10 +113,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR command,int) {
         if(wcsstr(command,L"--report-page")) app.showReport();
         if(argv) {for(int i=1;i+1<argc;++i) if(wcscmp(argv[i],L"--state")==0) {app.openCipherState(argv[++i]);}LocalFree(argv);}
         if(wcsstr(command,L"--capture") || wcsstr(command,L"--proxy")) app.startCapture();
-        bool done=false; int frame=0;
+        bool done=false; int frame=0;uint64_t nextCloseCheck=0;
         while(!done) {
             MSG msg; while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {TranslateMessage(&msg); DispatchMessageW(&msg); if(msg.message==WM_QUIT) done=true;}
             if(done) break;
+            if(closeRequested && GetTickCount64()>=nextCloseCheck){
+                nextCloseCheck=GetTickCount64()+250;
+                if(app.canClose()){DestroyWindow(window);continue;}
+            }
             if(resizeWidth && resizeHeight) {
                 context->OMSetRenderTargets(0,nullptr,nullptr); target.Reset();
                 if(FAILED(swapChain->ResizeBuffers(0,resizeWidth,resizeHeight,DXGI_FORMAT_UNKNOWN,0)) || !createTarget()) {result=4; break;}

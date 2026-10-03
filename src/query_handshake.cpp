@@ -130,6 +130,11 @@ Bytes WorldMitm::fromServer(std::span<const uint8_t> bytes){
     for(auto f:split.frames){auto frame=std::span(serverPending_).subspan(f.offset,f.length);append(out,serverFrame(frame,f.prefixBytes));observations.push_back({false,true,false,Bytes(frame.begin(),frame.end()),Bytes(frame.begin(),frame.end())});}
     serverPending_.erase(serverPending_.begin(),serverPending_.begin()+split.consumed);return out;
 }
+Bytes WorldMitm::mail(const MailRequest& request){
+    require(ready() && clientBoundary(),"握手和编码尚未自动验证");
+    auto plain=encodeMailRequest(request);auto wire=cipher_.mail(request);
+    observations.clear();observations.push_back({true,true,true,wire,std::move(plain)});return wire;
+}
 Bytes WorldMitm::guild(bool search,uint8_t order,std::string_view name){
     require(ready() && clientBoundary(),"握手和编码尚未自动验证");
     auto plain=encodeGuildRequest(search,order,name);auto wire=cipher_.guild(search,order,name);

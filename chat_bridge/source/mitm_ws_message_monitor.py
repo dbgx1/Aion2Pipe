@@ -27,7 +27,7 @@ from mitmproxy import ctx, http
 from mitmproxy.utils import asyncio_utils
 
 
-ADDON_BUILD = "2026-10-03.chat-auth-diagnostics.1"
+ADDON_BUILD = "2026-10-03.chat-virginia-origin.1"
 TARGET_HOST = "limep2-pub.global.plaync.com"
 TARGET_PATH = "/stomp"
 CHAT_API_HOST = "lime-p2-api.global.plaync.com"
@@ -320,7 +320,7 @@ def _json_string(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _print_raw_whisper_request(body: dict[str, Any], headers: dict[str, str], body_bytes: bytes) -> None:
+def _print_raw_whisper_request(body: dict[str, Any], headers: dict[str, str], body_bytes: bytes, url: str = SEND_WHISPER_URL) -> None:
     ordered_names = [
         "Host",
         "Accept",
@@ -335,14 +335,14 @@ def _print_raw_whisper_request(body: dict[str, Any], headers: dict[str, str], bo
         "Content-Length",
     ]
     display_headers = {
-        "Host": "lime-p2-api.global.plaync.com",
+        "Host": urlsplit(url).netloc,
         **headers,
         "Content-Length": str(len(body_bytes)),
     }
     body_text = json.dumps(body, ensure_ascii=False, indent=2)
     lines = [
         "[WHISPER RAW REQUEST BEGIN]",
-        f"POST {SEND_WHISPER_URL} HTTP/1.1",
+        f"POST {url} HTTP/1.1",
     ]
     for name in ordered_names:
         value = display_headers.get(name)
@@ -352,11 +352,11 @@ def _print_raw_whisper_request(body: dict[str, Any], headers: dict[str, str], bo
     print("\n".join(lines), flush=True)
 
 
-def _debug_whisper_request(body: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+def _debug_whisper_request(body: dict[str, Any], headers: dict[str, str], url: str = SEND_WHISPER_URL) -> dict[str, Any]:
     message_info = body.get("gameMessageInfo") or {}
     optional = message_info.get("optional")
     return {
-        "url": SEND_WHISPER_URL,
+        "url": url,
         "headers": {
             key: value for key, value in headers.items() if key.lower().startswith("lime-")
         },
@@ -481,7 +481,8 @@ def _normalize_optional(value: Any) -> str | None:
 def _chat_api_origin(url):
     parsed = urlsplit(url)
     if parsed.scheme == 'https' and parsed.netloc in (
-        'lime-p2-api.global.plaync.com', 'lime-arizona-p4-api.plaync.com'
+        'lime-p2-api.global.plaync.com', 'lime-arizona-p4-api.plaync.com',
+        'lime-virginia-p4-api.plaync.com'
     ):
         return 'https://' + parsed.netloc
     return None
@@ -657,6 +658,7 @@ class RuntimeState:
             self.trace_auth("login_request", header_present=bool(auth))
             if isinstance(body, dict):
                 self.update(
+                    chatApiOrigin=_chat_api_origin(url),
                     authnToken=body.get("authnToken"),
                     characterId=body.get("characterId"),
                     gameUserId=body.get("gameUserId"),
@@ -732,6 +734,7 @@ class RuntimeState:
                     optional=body.get("optional"),
                 )
                 self.merge_subscription(body.get("subscriptionInfo"))
+            self.update(chatApiOrigin=_chat_api_origin(url))
 
     def observe_chat(
         self,
@@ -897,6 +900,11 @@ def _send_whisper_http(
         runtime_state.trace_auth("send_whisper_missing_auth")
         raise ValueError("缺少聊天 Bearer：请先完成 gameLogin/loginWithToken")
 
+    with runtime_state.lock:
+        origin = runtime_state.data.get("chatApiOrigin")
+    if not origin or _chat_api_origin(origin) != origin:
+        raise ValueError("缺少当前聊天接口地址，请重新登录游戏以捕获登录信息")
+    url = origin + "/gameClient/sendWhisper"
     body = runtime_state.build_whisper_body(
         character_id,
         server_key,
@@ -912,9 +920,9 @@ def _send_whisper_http(
         **runtime_state.api_headers(),
     }
     body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    _print_raw_whisper_request(body, request_headers, body_bytes)
+    _print_raw_whisper_request(body, request_headers, body_bytes, url)
     request = urllib.request.Request(
-        SEND_WHISPER_URL,
+        url,
         data=body_bytes,
         headers=request_headers,
         method="POST",
@@ -928,7 +936,7 @@ def _send_whisper_http(
                 "ok": 200 <= response.status < 300,
                 "status": response.status,
                 "response": response_body,
-                "request": _debug_whisper_request(body, request_headers),
+                "request": _debug_whisper_request(body, request_headers, url),
             }
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
@@ -936,7 +944,7 @@ def _send_whisper_http(
             "ok": False,
             "status": exc.code,
             "response": _try_json(raw),
-            "request": _debug_whisper_request(body, request_headers),
+            "request": _debug_whisper_request(body, request_headers, url),
         }
     except urllib.error.URLError as exc:
         return {

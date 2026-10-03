@@ -49,6 +49,11 @@ private:
     char guildName_[257]{};
     std::string guildNotice_;
     void debugView();
+    void mailDebugView(const QueryConnection* connection);
+    char mailReceiver_[513]{},mailTitle_[201]{},mailBody_[2001]{};
+    std::string mailNotice_;
+    std::string mailPreview_;
+    int mailType_=0;
     void reportView();
     void queryWorkerView();
     void chatBridgeView();

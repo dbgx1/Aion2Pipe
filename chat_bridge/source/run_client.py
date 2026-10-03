@@ -1,6 +1,15 @@
 import os
 import subprocess
 import sys
+
+def _configure_output() -> None:
+    # Frozen Windows builds inherit the ANSI code page when stdout is a file.
+    # Chat names can contain Korean/Japanese: printing must never abort a hook.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+_configure_output()
 import traceback
 import account_switch  # Include local login IPC modules in frozen client builds.
 from datetime import datetime
@@ -12,7 +21,7 @@ from mitmproxy import certs
 from mitmproxy.tools.main import mitmdump, mitmweb
 
 
-CLIENT_BUILD = "2026-10-01.aion2pipe-integrated.2"
+CLIENT_BUILD = "2026-10-03.utf8-chat-output.1"
 ROOT = Path(__file__).resolve().parent
 FROZEN_ROOT = Path(getattr(sys, "_MEIPASS", ROOT))
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else ROOT.parent

@@ -1,5 +1,6 @@
 import sys, types, importlib.util, unittest, json, asyncio, tempfile, time, io
 from contextlib import redirect_stdout
+import ast
 from pathlib import Path
 from unittest.mock import patch
 sys.dont_write_bytecode = True
@@ -12,6 +13,20 @@ spec = importlib.util.spec_from_file_location('faction_relay', Path(__file__).wi
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 class Tests(unittest.TestCase):
+    def test_frozen_output_supports_multilingual_chat(self):
+        source = Path(__file__).with_name('run_client.py')
+        fn = next(n for n in ast.parse(source.read_text(encoding='utf-8')).body
+                  if isinstance(n, ast.FunctionDef) and n.name == '_configure_output')
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding='gbk')
+        scope = {'sys': types.SimpleNamespace(stdout=stream, stderr=None)}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(source), 'exec'), scope)
+        scope['_configure_output']()
+        stream.write('비 中文 日本語')
+        stream.flush()
+        self.assertEqual(buffer.getvalue().decode('utf-8'), '비 中文 日本語')
+        stream.close()
+
     def setUp(self):
         m.runtime_state = m.RuntimeState()
         m.runtime_state.update(serverKey='2201', characterId='self', userName='current', optional={'Race':'Dark'}, authorization='Bearer test', chatApiOrigin='https://lime-arizona-p4-api.plaync.com')
@@ -78,6 +93,30 @@ class Tests(unittest.TestCase):
         self.assertNotIn('secret-test-value', logs)
         self.assertNotIn('request-test-value', logs)
         self.assertNotIn('not logged', logs)
+
+    def test_virginia_login_and_whisper_route(self):
+        m.runtime_state = m.RuntimeState()
+        origin = 'https://lime-virginia-p4-api.plaync.com'
+        request = types.SimpleNamespace(host='64.25.35.157', pretty_host='64.25.35.157', headers={},
+            pretty_url='https://64.25.35.157/gameLogin/loginWithToken', path='/gameLogin/loginWithToken',
+            raw_content=json.dumps({'characterId':'self','serverKey':'1102','userName':'fixture','optional':{'Race':'Light'}}).encode())
+        flow = types.SimpleNamespace(request=request,
+            response=types.SimpleNamespace(headers={'authorization':'Bearer fixture'}, raw_content=b'{}', status_code=200),
+            client_conn=types.SimpleNamespace(sni='lime-virginia-p4-api.plaync.com'), server_conn=types.SimpleNamespace(sni=None))
+        class Response:
+            status=200
+            def __enter__(self): return self
+            def __exit__(self,*args): pass
+            def read(self): return b'{}'
+        with redirect_stdout(io.StringIO()), patch.object(m.urllib.request,'urlopen',return_value=Response()) as send:
+            m.runtime_state.observe_request(flow)
+            m.runtime_state.observe_response(flow)
+            self.assertEqual(m.runtime_state.authorization(),'Bearer fixture')
+            self.assertEqual(m.runtime_state.data['chatApiOrigin'],origin)
+            self.assertTrue(m._send_whisper_http('target','1102','fixture')['ok'])
+            self.assertEqual(send.call_args.args[0].full_url,origin+'/gameClient/sendWhisper')
+            self.assertEqual(send.call_args.args[0].get_header('Authorization'),'Bearer fixture')
+        self.assertIsNone(m._chat_api_origin(origin+'.evil.test/gameLogin/loginWithToken'))
 
     def test_accelerator_ip_route_uses_tls_sni(self):
         request = types.SimpleNamespace(

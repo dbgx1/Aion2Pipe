@@ -54,13 +54,20 @@ bool ChatBridge::start(){
     // TLS SNI/HTTP headers are available rather than rejecting the tunnel early.
     allowHosts=std::make_unique<EnvironmentRestore>(L"AION2_ALLOW_HOSTS",L"");
     const auto directory=executable_.parent_path().wstring();
-    const bool created=CreateProcessW(executable_.c_str(),command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,directory.c_str(),&startup,&info)!=FALSE;
+    const bool created=CreateProcessW(executable_.c_str(),command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW|CREATE_SUSPENDED,nullptr,directory.c_str(),&startup,&info)!=FALSE;
     CloseHandle(output);
     if(!created){message_="聊天组件启动失败："+std::to_string(GetLastError());diagnostics().write("chat_bridge_error",message_);return false;}
-    CloseHandle(info.hThread);process_=info.hProcess;processId_=info.dwProcessId;exitCode_=STILL_ACTIVE;
+    process_=info.hProcess;processId_=info.dwProcessId;exitCode_=STILL_ACTIVE;
     job_=CreateJobObjectW(nullptr,nullptr);
-    if(job_){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job_,JobObjectExtendedLimitInformation,&limits,sizeof(limits));AssignProcessToJobObject(job_,process_);}
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if(!job_ || !SetInformationJobObject(job_,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) ||
+       !AssignProcessToJobObject(job_,process_) || ResumeThread(info.hThread)==DWORD(-1)){
+        const auto error=GetLastError();TerminateProcess(process_,1);WaitForSingleObject(process_,5000);
+        CloseHandle(info.hThread);CloseHandle(process_);process_=INVALID_HANDLE_VALUE;processId_=0;
+        if(job_){CloseHandle(job_);job_=nullptr;}
+        message_="无法建立聊天组件退出联动："+std::to_string(error);diagnostics().write("chat_bridge_error",message_);return false;
+    }
+    CloseHandle(info.hThread);
     message_="聊天接管组件正在运行";diagnostics().write("chat_bridge_start","pid="+std::to_string(processId_)+" executable="+utf8(executable_.wstring()));return true;
 }
 
