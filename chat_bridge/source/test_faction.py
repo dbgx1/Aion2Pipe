@@ -1,4 +1,5 @@
-import sys, types, importlib.util, unittest, json, asyncio, tempfile, time
+import sys, types, importlib.util, unittest, json, asyncio, tempfile, time, io
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 sys.dont_write_bytecode = True
@@ -41,6 +42,42 @@ class Tests(unittest.TestCase):
 
     def test_allowlist(self):
         self.assertIsNone(m._chat_api_origin('https://lime-arizona-p4-api.plaync.com.evil.test/gameClient/sendMessage'))
+
+    def test_auth_capture_and_diagnostics_with_accelerator_ip(self):
+        m.runtime_state = m.RuntimeState()
+        request = types.SimpleNamespace(
+            host='198.18.0.19', pretty_host='198.18.0.19', headers={},
+            pretty_url='https://198.18.0.19/gameLogin/loginWithToken',
+            path='/gameLogin/loginWithToken', raw_content=b'{}')
+        flow = types.SimpleNamespace(request=request,
+            response=types.SimpleNamespace(headers={'authorization': 'Bearer secret-test-value'},
+                                           raw_content=b'{}', status_code=200),
+            client_conn=types.SimpleNamespace(sni='lime-arizona-p4-api.plaync.com'),
+            server_conn=types.SimpleNamespace(sni=None))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            m.runtime_state.observe_request(flow)
+            m.runtime_state.observe_response(flow)
+            self.assertEqual(m.runtime_state.authorization(), 'Bearer secret-test-value')
+            m.runtime_state = m.RuntimeState()
+            request.path='/gameClient/getBlockUserList'
+            request.pretty_url='https://198.18.0.19/gameClient/getBlockUserList'
+            request.headers={'authorization': 'Bearer request-test-value'}
+            m.runtime_state.observe_request(flow)
+            self.assertEqual(m.runtime_state.authorization(), 'Bearer request-test-value')
+            request.headers={}
+            m.runtime_state.observe_request(flow)
+            self.assertEqual(m.runtime_state.authorization(), 'Bearer request-test-value')
+            m.runtime_state = m.RuntimeState()
+            with self.assertRaisesRegex(ValueError, 'Bearer'):
+                m._send_whisper_http('target', '2201', 'not logged')
+        logs=output.getvalue()
+        self.assertIn('login_response', logs)
+        self.assertIn('send_whisper_missing_auth', logs)
+        self.assertIn('"cached": true', logs)
+        self.assertNotIn('secret-test-value', logs)
+        self.assertNotIn('request-test-value', logs)
+        self.assertNotIn('not logged', logs)
 
     def test_accelerator_ip_route_uses_tls_sni(self):
         request = types.SimpleNamespace(

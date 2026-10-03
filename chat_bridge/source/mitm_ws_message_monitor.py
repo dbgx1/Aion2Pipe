@@ -27,7 +27,7 @@ from mitmproxy import ctx, http
 from mitmproxy.utils import asyncio_utils
 
 
-ADDON_BUILD = "2026-10-01.game-server-heartbeat.1"
+ADDON_BUILD = "2026-10-03.chat-auth-diagnostics.1"
 TARGET_HOST = "limep2-pub.global.plaync.com"
 TARGET_PATH = "/stomp"
 CHAT_API_HOST = "lime-p2-api.global.plaync.com"
@@ -654,6 +654,7 @@ class RuntimeState:
             self.remember_user(object_character_id, server_id=object_server_key)
 
         if _chat_api_origin(url) and urlsplit(url).path == "/gameLogin/loginWithToken":
+            self.trace_auth("login_request", header_present=bool(auth))
             if isinstance(body, dict):
                 self.update(
                     authnToken=body.get("authnToken"),
@@ -674,6 +675,7 @@ class RuntimeState:
 
         self.observe_api_headers(flow.request.headers)
         self.update(authorization=auth, userAgent=user_agent, chatApiOrigin=_chat_api_origin(url))
+        self.trace_auth("game_client_request", header_present=bool(auth))
         if not isinstance(body, dict):
             return
 
@@ -716,6 +718,9 @@ class RuntimeState:
                 if flow.response
                 else None
             )
+            self.trace_auth("login_response", header_present=bool(
+                flow.response and _auth_header(flow.response.headers.get("authorization"))),
+                status=getattr(flow.response, "status_code", None))
             if isinstance(body, dict):
                 self.update(
                     characterId=body.get("characterId"),
@@ -852,6 +857,16 @@ class RuntimeState:
         with self.lock:
             return self.data.get("authorization")
 
+    def trace_auth(self, event: str, *, header_present=None, status=None) -> None:
+        # Never log token contents, prefixes, request bodies, or arbitrary headers.
+        with self.lock:
+            cached = bool(self.data.get("authorization"))
+        print("[CHAT AUTH] " + json.dumps({
+            "time": datetime.now(timezone.utc).isoformat(), "pid": os.getpid(),
+            "agentId": AGENT_ID, "event": event, "headerPresent": header_present,
+            "cached": cached, "status": status,
+        }, ensure_ascii=True), flush=True)
+
     def user_agent(self) -> str:
         with self.lock:
             return self.data.get("userAgent") or (
@@ -879,6 +894,7 @@ def _send_whisper_http(
 ) -> dict[str, Any]:
     authorization = runtime_state.authorization()
     if not authorization:
+        runtime_state.trace_auth("send_whisper_missing_auth")
         raise ValueError("缺少聊天 Bearer：请先完成 gameLogin/loginWithToken")
 
     body = runtime_state.build_whisper_body(
